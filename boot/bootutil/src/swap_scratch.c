@@ -716,8 +716,7 @@ swap_run(struct boot_loader_state *state, struct boot_status *bs,
                                                        last_idx_secondary_slot);
         }
         if (primary_slot_size >= copy_size &&
-                secondary_slot_size >= copy_size &&
-                primary_slot_size == secondary_slot_size) {
+                secondary_slot_size >= copy_size) {
             break;
         }
         last_sector_idx++;
