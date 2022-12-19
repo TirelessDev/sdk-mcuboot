@@ -745,14 +745,17 @@ swap_run(struct boot_loader_state *state, struct boot_status *bs,
            last_idx_secondary_slot++;
         }
         if (primary_slot_size >= copy_size && secondary_slot_size >= copy_size && primary_slot_size == secondary_slot_size)
-        {  
+        {
+            //undo the increment of the last sector index before breaking out of the loop
+            last_sector_idx--;
+            //last_idx_secondary_slot--; // unused
             break;
         }
         else if(last_sector_idx >= primary_slot_sectors || last_idx_secondary_slot >= secondary_slot_sectors )
         {
             /* if either img accesses its last sector, increase copy size to max so image trailer is delt with correctly */
-            last_sector_idx = boot_img_num_sectors(state, BOOT_PRIMARY_SLOT) -1;
-            //last_idx_secondary_slot = boot_img_num_sectors(state, BOOT_SECONDARY_SLOT) -1; //unused
+            last_sector_idx = primary_slot_sectors -1;
+            //last_idx_secondary_slot = secondary_slot_sectors -1; //unused
             break;
         }
     }
