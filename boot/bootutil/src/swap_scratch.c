@@ -587,14 +587,12 @@ boot_swap_sectors(int idx, uint32_t sz, struct boot_loader_state *state,
                 assert(rc == 0);
 
                 /* Erase the temporary trailer from the scratch area. */
-                rc = boot_erase_region(fap_scratch, 0,
-                        flash_area_get_size(fap_scratch));
+                rc = boot_erase_region(fap_scratch, 0, flash_area_get_size(fap_scratch));
                 assert(rc == 0);
             }
         }
 
-        rc = boot_copy_region(state, fap_secondary_slot, fap_scratch,
-                              img_off, 0, copy_sz);
+        rc = boot_copy_region(state, fap_secondary_slot, fap_scratch, img_off, 0, copy_sz);
         assert(rc == 0);
 
         rc = boot_write_status(state, bs);
@@ -621,26 +619,14 @@ boot_swap_sectors(int idx, uint32_t sz, struct boot_loader_state *state,
         
         assert(rc == 0);
 
-        rc = boot_copy_region(state, fap_primary_slot, fap_secondary_slot,
-                              img_off, img_off, copy_sz);
+        rc = boot_copy_region(state, fap_primary_slot, fap_secondary_slot, img_off, img_off, copy_sz);
         assert(rc == 0);
 
         if (bs->idx == BOOT_STATUS_IDX_0 && !bs->use_scratch) {
             /* If not all sectors of the slot are being swapped,
              * guarantee here that only the primary slot will have the state.
              */
-            /* Manually erasing the trailer from the last slot */
-            if(secondary_sector_size > trailer_sz)
-            {
-                /*erase the last sector*/
-                uint32_t off;
-                off = boot_img_sector_off(state, BOOT_SECONDARY_SLOT, boot_img_num_sectors(state, BOOT_SECONDARY_SLOT) - 1);
-                rc = flash_erase(device_get_binding(fap_secondary_slot->fa_dev_name), fap_secondary_slot->fa_off + off, secondary_sector_size);
-            }
-            else
-            {
-                rc = swap_erase_trailer_sectors(state, fap_secondary_slot);
-            }
+            rc = swap_erase_trailer_sectors(state, fap_secondary_slot);
             assert(rc == 0);
         }
 
@@ -656,8 +642,7 @@ boot_swap_sectors(int idx, uint32_t sz, struct boot_loader_state *state,
         /* NOTE: If this is the final sector, we exclude the image trailer from
          * this copy (copy_sz was truncated earlier).
          */
-        rc = boot_copy_region(state, fap_scratch, fap_primary_slot,
-                              0, img_off, copy_sz);
+        rc = boot_copy_region(state, fap_scratch, fap_primary_slot, 0, img_off, copy_sz);
         assert(rc == 0);
 
         if (bs->use_scratch) {
@@ -760,14 +745,17 @@ swap_run(struct boot_loader_state *state, struct boot_status *bs,
            last_idx_secondary_slot++;
         }
         if (primary_slot_size >= copy_size && secondary_slot_size >= copy_size && primary_slot_size == secondary_slot_size)
-        {  
+        {
+            //undo the increment of the last sector index before breaking out of the loop
+            last_sector_idx--;
+            //last_idx_secondary_slot--; // unused
             break;
         }
         else if(last_sector_idx >= primary_slot_sectors || last_idx_secondary_slot >= secondary_slot_sectors )
         {
             /* if either img accesses its last sector, increase copy size to max so image trailer is delt with correctly */
-            last_sector_idx = boot_img_num_sectors(state, BOOT_PRIMARY_SLOT) -1;
-            //last_idx_secondary_slot = boot_img_num_sectors(state, BOOT_SECONDARY_SLOT) -1; //unused
+            last_sector_idx = primary_slot_sectors -1;
+            //last_idx_secondary_slot = secondary_slot_sectors -1; //unused
             break;
         }
     }
