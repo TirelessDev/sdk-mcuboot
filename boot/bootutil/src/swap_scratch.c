@@ -26,6 +26,8 @@
 #include "swap_priv.h"
 #include "bootutil/bootutil_log.h"
 
+#include <zephyr/drivers/flash.h>
+
 #include "mcuboot_config/mcuboot_config.h"
 
 BOOT_LOG_MODULE_DECLARE(mcuboot);
@@ -463,6 +465,19 @@ boot_copy_sz(const struct boot_loader_state *state, int last_sector_idx,
     sz = 0;
 
     scratch_sz = boot_scratch_area_size(state);
+
+    /* When accessing the last sector of NAND set the max copy size to the remaining
+     * amount of memory in the image. (check is against primary flash index, but 
+     * the primary and secondary will matching) This will ensure the trailer is 
+     * copied and wiped correctly
+     */
+    if(last_sector_idx == boot_img_num_sectors(state, BOOT_PRIMARY_SLOT)-1)
+    {
+        /* Get end address of secondary (NAND) image, and start address of 
+         * the final sector and calculate the differece */
+        scratch_sz = BOOT_IMG_AREA(state, BOOT_SECONDARY_SLOT)->fa_size  - boot_img_sector_off(state, BOOT_SECONDARY_SLOT, boot_img_num_sectors(state, BOOT_SECONDARY_SLOT) -1);
+    }
+
     for (i = last_sector_idx; i >= 0; i--) {
         new_sz = sz + boot_img_sector_size(state, BOOT_PRIMARY_SLOT, i);
         /*
@@ -503,7 +518,6 @@ boot_swap_sectors(int idx, uint32_t sz, struct boot_loader_state *state,
     const struct flash_area *fap_scratch;
     uint32_t copy_sz;
     uint32_t trailer_sz;
-    uint32_t sector_sz;
     uint32_t img_off;
     uint32_t scratch_trailer_off;
     struct boot_swap_state swap_state;
@@ -528,23 +542,8 @@ boot_swap_sectors(int idx, uint32_t sz, struct boot_loader_state *state,
      * controls if special handling is needed (swapping last sector).
      */
     last_sector = boot_img_num_sectors(state, BOOT_PRIMARY_SLOT) - 1;
-    sector_sz = boot_img_sector_size(state, BOOT_PRIMARY_SLOT, last_sector);
-
-    if (sector_sz < trailer_sz) {
-        uint32_t trailer_sector_sz = sector_sz;
-
-        while (trailer_sector_sz < trailer_sz) {
-            /* Consider that the image trailer may span across sectors of
-             * different sizes.
-             */
-            sector_sz = boot_img_sector_size(state, BOOT_PRIMARY_SLOT, --last_sector);
-
-            trailer_sector_sz += sector_sz;
-        }
-    }
-
-    if ((img_off + sz) >
-        boot_img_sector_off(state, BOOT_PRIMARY_SLOT, last_sector)) {
+    if ((img_off + sz) > boot_img_sector_off(state, BOOT_PRIMARY_SLOT, last_sector))
+    {
         copy_sz -= trailer_sz;
     }
 
@@ -588,14 +587,12 @@ boot_swap_sectors(int idx, uint32_t sz, struct boot_loader_state *state,
                 assert(rc == 0);
 
                 /* Erase the temporary trailer from the scratch area. */
-                rc = boot_erase_region(fap_scratch, 0,
-                        flash_area_get_size(fap_scratch));
+                rc = boot_erase_region(fap_scratch, 0, flash_area_get_size(fap_scratch));
                 assert(rc == 0);
             }
         }
 
-        rc = boot_copy_region(state, fap_secondary_slot, fap_scratch,
-                              img_off, 0, copy_sz);
+        rc = boot_copy_region(state, fap_secondary_slot, fap_scratch, img_off, 0, copy_sz);
         assert(rc == 0);
 
         rc = boot_write_status(state, bs);
@@ -604,11 +601,25 @@ boot_swap_sectors(int idx, uint32_t sz, struct boot_loader_state *state,
     }
 
     if (bs->state == BOOT_STATUS_STATE_1) {
-        rc = boot_erase_region(fap_secondary_slot, img_off, sz);
+         /* If we in the last section and attempting to erase less than a full
+        * block/ sector of the NAND flash, we need to manually erase it, as 
+        * some of the memory is out of bounds of the flash area. This is OK as
+        * this extra area is just padding and its OK to erase it. The flash driver 
+        * only allows complete block sizes to be erased.
+        */                                                                              /* could use current sector instead of last sector */
+        size_t secondary_sector_size = boot_img_sector_size(state, BOOT_SECONDARY_SLOT, boot_img_num_sectors(state, BOOT_SECONDARY_SLOT) - 1);
+        if(sz < secondary_sector_size)
+        {
+	        rc = flash_erase(fap_secondary_slot->fa_dev, fap_secondary_slot->fa_off + img_off, secondary_sector_size);
+        }
+        else
+        {
+            rc = boot_erase_region(fap_secondary_slot, img_off, sz);
+        }
+        
         assert(rc == 0);
 
-        rc = boot_copy_region(state, fap_primary_slot, fap_secondary_slot,
-                              img_off, img_off, copy_sz);
+        rc = boot_copy_region(state, fap_primary_slot, fap_secondary_slot, img_off, img_off, copy_sz);
         assert(rc == 0);
 
         if (bs->idx == BOOT_STATUS_IDX_0 && !bs->use_scratch) {
@@ -631,8 +642,7 @@ boot_swap_sectors(int idx, uint32_t sz, struct boot_loader_state *state,
         /* NOTE: If this is the final sector, we exclude the image trailer from
          * this copy (copy_sz was truncated earlier).
          */
-        rc = boot_copy_region(state, fap_scratch, fap_primary_slot,
-                              0, img_off, copy_sz);
+        rc = boot_copy_region(state, fap_scratch, fap_primary_slot, 0, img_off, copy_sz);
         assert(rc == 0);
 
         if (bs->use_scratch) {
@@ -686,6 +696,7 @@ boot_swap_sectors(int idx, uint32_t sz, struct boot_loader_state *state,
         BOOT_STATUS_ASSERT(rc == 0);
 
         if (erase_scratch) {
+            /* erase whole scratch region, not just the copy size */
             rc = boot_erase_region(fap_scratch, 0, flash_area_get_size(fap_scratch));
             assert(rc == 0);
         }
@@ -711,8 +722,9 @@ swap_run(struct boot_loader_state *state, struct boot_status *bs,
     secondary_slot_size = 0;
     last_sector_idx = 0;
     last_idx_secondary_slot = 0;
-
-    BOOT_LOG_INF("Starting swap using scratch algorithm.");
+    uint32_t primary_slot_sectors = boot_img_num_sectors(state, BOOT_PRIMARY_SLOT);
+    uint32_t secondary_slot_sectors = boot_img_num_sectors(state, BOOT_SECONDARY_SLOT);
+    
 
     /*
      * Knowing the size of the largest image between both slots, here we
@@ -720,30 +732,37 @@ swap_run(struct boot_loader_state *state, struct boot_status *bs,
      * Since we already know that both slots are compatible, the secondary
      * slot's last sector is not really required after this check is finished.
      */
-    while (1) {
-        if ((primary_slot_size < copy_size) ||
-            (primary_slot_size < secondary_slot_size)) {
-           primary_slot_size += boot_img_sector_size(state,
-                                                     BOOT_PRIMARY_SLOT,
-                                                     last_sector_idx);
+    while (1)
+    {
+        if ((primary_slot_size < copy_size) || (primary_slot_size < secondary_slot_size))
+        {
+           primary_slot_size += boot_img_sector_size(state, BOOT_PRIMARY_SLOT, last_sector_idx);
+           last_sector_idx++;
         }
-        if ((secondary_slot_size < copy_size) ||
-            (secondary_slot_size < primary_slot_size)) {
-           secondary_slot_size += boot_img_sector_size(state,
-                                                       BOOT_SECONDARY_SLOT,
-                                                       last_idx_secondary_slot);
+        if ((secondary_slot_size < copy_size) || (secondary_slot_size < primary_slot_size))
+        {
+           secondary_slot_size += boot_img_sector_size(state, BOOT_SECONDARY_SLOT, last_idx_secondary_slot);
+           last_idx_secondary_slot++;
         }
-        if (primary_slot_size >= copy_size &&
-                secondary_slot_size >= copy_size &&
-                primary_slot_size == secondary_slot_size) {
+        if (primary_slot_size >= copy_size && secondary_slot_size >= copy_size && primary_slot_size == secondary_slot_size)
+        {
+            //undo the increment of the last sector index before breaking out of the loop
+            last_sector_idx--;
+            //last_idx_secondary_slot--; // unused
             break;
         }
-        last_sector_idx++;
-        last_idx_secondary_slot++;
+        else if(last_sector_idx >= primary_slot_sectors || last_idx_secondary_slot >= secondary_slot_sectors )
+        {
+            /* if either img accesses its last sector, increase copy size to max so image trailer is delt with correctly */
+            last_sector_idx = primary_slot_sectors -1;
+            //last_idx_secondary_slot = secondary_slot_sectors -1; //unused
+            break;
+        }
     }
 
     swap_idx = 0;
-    while (last_sector_idx >= 0) {
+    while (last_sector_idx >= 0)
+    {
         sz = boot_copy_sz(state, last_sector_idx, &first_sector_idx);
         if (swap_idx >= (bs->idx - BOOT_STATUS_IDX_0)) {
             boot_swap_sectors(first_sector_idx, sz, state, bs);
@@ -755,118 +774,6 @@ swap_run(struct boot_loader_state *state, struct boot_status *bs,
 
 }
 #endif /* !MCUBOOT_OVERWRITE_ONLY */
-
-int app_max_size(struct boot_loader_state *state)
-{
-    size_t num_sectors_primary;
-    size_t num_sectors_secondary;
-    size_t sz0, sz1;
-    size_t primary_slot_sz, secondary_slot_sz;
-#ifndef MCUBOOT_OVERWRITE_ONLY
-    size_t scratch_sz;
-#endif
-    size_t i, j;
-    int8_t smaller;
-
-    num_sectors_primary = boot_img_num_sectors(state, BOOT_PRIMARY_SLOT);
-    num_sectors_secondary = boot_img_num_sectors(state, BOOT_SECONDARY_SLOT);
-
-#ifndef MCUBOOT_OVERWRITE_ONLY
-    scratch_sz = boot_scratch_area_size(state);
-#endif
-
-    /*
-     * The following loop scans all sectors in a linear fashion, assuring that
-     * for each possible sector in each slot, it is able to fit in the other
-     * slot's sector or sectors. Slot's should be compatible as long as any
-     * number of a slot's sectors are able to fit into another, which only
-     * excludes cases where sector sizes are not a multiple of each other.
-     */
-    i = sz0 = primary_slot_sz = 0;
-    j = sz1 = secondary_slot_sz = 0;
-    smaller = 0;
-    while (i < num_sectors_primary || j < num_sectors_secondary) {
-        if (sz0 == sz1) {
-            sz0 += boot_img_sector_size(state, BOOT_PRIMARY_SLOT, i);
-            sz1 += boot_img_sector_size(state, BOOT_SECONDARY_SLOT, j);
-            i++;
-            j++;
-        } else if (sz0 < sz1) {
-            sz0 += boot_img_sector_size(state, BOOT_PRIMARY_SLOT, i);
-            /* Guarantee that multiple sectors of the secondary slot
-             * fit into the primary slot.
-             */
-            if (smaller == 2) {
-                BOOT_LOG_WRN("Cannot upgrade: slots have non-compatible sectors");
-                return 0;
-            }
-            smaller = 1;
-            i++;
-        } else {
-            sz1 += boot_img_sector_size(state, BOOT_SECONDARY_SLOT, j);
-            /* Guarantee that multiple sectors of the primary slot
-             * fit into the secondary slot.
-             */
-            if (smaller == 1) {
-                BOOT_LOG_WRN("Cannot upgrade: slots have non-compatible sectors");
-                return 0;
-            }
-            smaller = 2;
-            j++;
-        }
-#ifndef MCUBOOT_OVERWRITE_ONLY
-        if (sz0 == sz1) {
-            primary_slot_sz += sz0;
-            secondary_slot_sz += sz1;
-            /* Scratch has to fit each swap operation to the size of the larger
-             * sector among the primary slot and the secondary slot.
-             */
-            if (sz0 > scratch_sz || sz1 > scratch_sz) {
-                BOOT_LOG_WRN("Cannot upgrade: not all sectors fit inside scratch");
-                return 0;
-            }
-            smaller = sz0 = sz1 = 0;
-        }
-#endif
-    }
-
-#ifdef MCUBOOT_OVERWRITE_ONLY
-    return (sz1 < sz0 ? sz1 : sz0);
-#else
-    return (secondary_slot_sz < primary_slot_sz ? secondary_slot_sz : primary_slot_sz);
-#endif
-}
-#else
-int app_max_size(struct boot_loader_state *state)
-{
-    const struct flash_area *fap;
-    int fa_id;
-    int rc;
-    uint32_t active_slot;
-    int primary_sz, secondary_sz;
-
-    active_slot = state->slot_usage[BOOT_CURR_IMG(state)].active_slot;
-
-    fa_id = flash_area_id_from_multi_image_slot(BOOT_CURR_IMG(state), active_slot);
-    rc = flash_area_open(fa_id, &fap);
-    assert(rc == 0);
-    primary_sz = flash_area_get_size(fap);
-    flash_area_close(fap);
-
-    if (active_slot == BOOT_PRIMARY_SLOT) {
-        active_slot = BOOT_SECONDARY_SLOT;
-    } else {
-        active_slot = BOOT_PRIMARY_SLOT;
-    }
-
-    fa_id = flash_area_id_from_multi_image_slot(BOOT_CURR_IMG(state), active_slot);
-    rc = flash_area_open(fa_id, &fap);
-    assert(rc == 0);
-    secondary_sz = flash_area_get_size(fap);
-    flash_area_close(fap);
-
-    return (secondary_sz < primary_sz ? secondary_sz : primary_sz);
-}
 
 #endif /* !MCUBOOT_DIRECT_XIP && !MCUBOOT_RAM_LOAD */
 

@@ -36,6 +36,7 @@
 #include "bootutil/crypto/sha.h"
 #include "bootutil/sign_key.h"
 #include "bootutil/security_cnt.h"
+#include "bootutil/bootutil_log.h"
 #include "bootutil/fault_injection_hardening.h"
 
 #include "mcuboot_config/mcuboot_config.h"
@@ -55,6 +56,8 @@
 #endif
 
 #include "bootutil_priv.h"
+
+BOOT_LOG_MODULE_DECLARE(mcuboot);
 
 /*
  * Compute SHA hash over the image.
@@ -415,6 +418,7 @@ bootutil_img_validate(struct enc_key_data *enc_state, int image_index,
     rc = bootutil_img_hash(enc_state, image_index, hdr, fap, tmp_buf,
             tmp_buf_sz, hash, seed, seed_len);
     if (rc) {
+        BOOT_LOG_ERR("Failed to hash image");
         goto out;
     }
 
@@ -424,6 +428,7 @@ bootutil_img_validate(struct enc_key_data *enc_state, int image_index,
 
     rc = bootutil_tlv_iter_begin(&it, hdr, fap, IMAGE_TLV_ANY, false);
     if (rc) {
+        BOOT_LOG_ERR("Failed to initialize TLV iterator");
         goto out;
     }
 
@@ -439,6 +444,7 @@ bootutil_img_validate(struct enc_key_data *enc_state, int image_index,
     while (true) {
         rc = bootutil_tlv_iter_next(&it, &off, &len, &type);
         if (rc < 0) {
+            BOOT_LOG_ERR("Failed to iterate over TLVs");
             goto out;
         } else if (rc > 0) {
             break;
@@ -460,6 +466,7 @@ bootutil_img_validate(struct enc_key_data *enc_state, int image_index,
              }
              if (!found) {
                   FIH_SET(fih_rc, FIH_FAILURE);
+                  BOOT_LOG_ERR("Rogue TLV found");
                   goto out;
              }
         }
@@ -469,16 +476,19 @@ bootutil_img_validate(struct enc_key_data *enc_state, int image_index,
             /* Verify the image hash. This must always be present. */
             if (len != sizeof(hash)) {
                 rc = -1;
+                BOOT_LOG_ERR("Invalid hash length");
                 goto out;
             }
             rc = LOAD_IMAGE_DATA(hdr, fap, off, buf, sizeof(hash));
             if (rc) {
+                BOOT_LOG_ERR("Failed to read hash");
                 goto out;
             }
 
             FIH_CALL(boot_fih_memequal, fih_rc, hash, buf, sizeof(hash));
             if (FIH_NOT_EQ(fih_rc, FIH_SUCCESS)) {
                 FIH_SET(fih_rc, FIH_FAILURE);
+                BOOT_LOG_ERR("Hashes do not match");
                 goto out;
             }
 
@@ -490,11 +500,13 @@ bootutil_img_validate(struct enc_key_data *enc_state, int image_index,
              */
             if (len > KEY_BUF_SIZE) {
                 rc = -1;
+                BOOT_LOG_ERR("Invalid key length");
                 goto out;
             }
 #ifndef MCUBOOT_HW_KEY
             rc = LOAD_IMAGE_DATA(hdr, fap, off, buf, len);
             if (rc) {
+                BOOT_LOG_ERR("Failed to read key");
                 goto out;
             }
             key_id = bootutil_find_key(buf, len);
@@ -519,10 +531,12 @@ bootutil_img_validate(struct enc_key_data *enc_state, int image_index,
             }
             if (!EXPECTED_SIG_LEN(len) || len > sizeof(buf)) {
                 rc = -1;
+                BOOT_LOG_ERR("Invalid signature length");
                 goto out;
             }
             rc = LOAD_IMAGE_DATA(hdr, fap, off, buf, len);
             if (rc) {
+                BOOT_LOG_ERR("Failed to read signature");
                 goto out;
             }
             FIH_CALL(bootutil_verify_sig, valid_signature, hash, sizeof(hash),
@@ -571,6 +585,7 @@ bootutil_img_validate(struct enc_key_data *enc_state, int image_index,
 
     rc = !image_hash_valid;
     if (rc) {
+        BOOT_LOG_ERR("Image hash not found");
         goto out;
     }
 #ifdef EXPECTED_SIG_TLV

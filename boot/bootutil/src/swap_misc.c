@@ -25,6 +25,7 @@
 #include "bootutil_priv.h"
 #include "swap_priv.h"
 #include "bootutil/bootutil_log.h"
+#include <zephyr/drivers/flash.h>
 
 #include "mcuboot_config/mcuboot_config.h"
 
@@ -66,6 +67,20 @@ swap_erase_trailer_sectors(const struct boot_loader_state *state,
     sector = boot_img_num_sectors(state, slot) - 1;
     trailer_sz = boot_trailer_sz(BOOT_WRITE_SZ(state));
     total_sz = 0;
+    sz = boot_img_sector_size(state, slot, sector);
+    if(slot == BOOT_SECONDARY_SLOT)
+    {
+        /* If the slots is secondary and the erase is out of bounds due to
+        * the large NAND flash block size, erase the last slot manually */
+        if(sz > trailer_sz)
+        {
+            /*erase the last sector*/
+            uint32_t off;
+            off = boot_img_sector_off(state, BOOT_SECONDARY_SLOT, boot_img_num_sectors(state, BOOT_SECONDARY_SLOT) - 1);
+            rc = flash_erase(fap->fa_dev, fap->fa_off + off, sz);
+        }
+        return rc;
+    }
     do {
         sz = boot_img_sector_size(state, slot, sector);
         off = boot_img_sector_off(state, slot, sector);
